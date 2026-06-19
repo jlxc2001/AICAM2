@@ -3,12 +3,11 @@
 #include <android/log.h>
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
+#include <cstring>
 #include <string>
 #include <vector>
-
-#include <opencv2/core/core.hpp>
-#include <opencv2/imgproc/imgproc.hpp>
 
 #include "net.h"
 #include "cpu.h"
@@ -17,8 +16,19 @@
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 
+struct RectF {
+    float x;
+    float y;
+    float width;
+    float height;
+
+    float area() const {
+        return std::max(0.f, width) * std::max(0.f, height);
+    }
+};
+
 struct Object {
-    cv::Rect_<float> rect;
+    RectF rect;
     int label;
     float prob;
 };
@@ -38,20 +48,36 @@ static void softmax(const float* src, float* dst, int length) {
     for (int i = 0; i < length; i++) {
         if (src[i] > alpha) alpha = src[i];
     }
+
     float denominator = 0.f;
     for (int i = 0; i < length; i++) {
         dst[i] = fast_exp(src[i] - alpha);
         denominator += dst[i];
     }
     if (denominator <= 0.f) denominator = 1.f;
+
     for (int i = 0; i < length; i++) {
         dst[i] /= denominator;
     }
 }
 
 static float intersection_area(const Object& a, const Object& b) {
-    cv::Rect_<float> inter = a.rect & b.rect;
-    return inter.area();
+    float ax0 = a.rect.x;
+    float ay0 = a.rect.y;
+    float ax1 = a.rect.x + a.rect.width;
+    float ay1 = a.rect.y + a.rect.height;
+
+    float bx0 = b.rect.x;
+    float by0 = b.rect.y;
+    float bx1 = b.rect.x + b.rect.width;
+    float by1 = b.rect.y + b.rect.height;
+
+    float x0 = std::max(ax0, bx0);
+    float y0 = std::max(ay0, by0);
+    float x1 = std::min(ax1, bx1);
+    float y1 = std::min(ay1, by1);
+
+    return std::max(0.f, x1 - x0) * std::max(0.f, y1 - y0);
 }
 
 static void qsort_descent_inplace(std::vector<Object>& objects, int left, int right) {
@@ -80,6 +106,7 @@ static void qsort_descent_inplace(std::vector<Object>& objects) {
 
 static void nms_sorted_bboxes(const std::vector<Object>& objects, std::vector<int>& picked, float nms_threshold) {
     picked.clear();
+
     const int n = (int)objects.size();
     std::vector<float> areas(n);
     for (int i = 0; i < n; i++) {
@@ -89,6 +116,7 @@ static void nms_sorted_bboxes(const std::vector<Object>& objects, std::vector<in
     for (int i = 0; i < n; i++) {
         const Object& a = objects[i];
         int keep = 1;
+
         for (int j : picked) {
             const Object& b = objects[j];
             float inter_area = intersection_area(a, b);
@@ -99,6 +127,7 @@ static void nms_sorted_bboxes(const std::vector<Object>& objects, std::vector<in
                 break;
             }
         }
+
         if (keep) picked.push_back(i);
     }
 }
@@ -106,28 +135,28 @@ static void nms_sorted_bboxes(const std::vector<Object>& objects, std::vector<in
 static void generate_proposals(const ncnn::Mat& cls_pred,
                                const ncnn::Mat& dis_pred,
                                int stride,
-                               int in_pad_w,
-                               int in_pad_h,
+                               int in_w,
+                               int in_h,
                                float prob_threshold,
                                std::vector<Object>& objects) {
-    const int num_grid_x = in_pad_w / stride;
-    const int num_grid_y = in_pad_h / stride;
+    const int num_grid_x = in_w / stride;
+    const int num_grid_y = in_h / stride;
     const int num_points = num_grid_x * num_grid_y;
 
     if (cls_pred.dims != 2 || dis_pred.dims != 2) {
         return;
     }
 
-    int cls_w = cls_pred.w;
-    int cls_h = cls_pred.h;
-    int dis_w = dis_pred.w;
-    int dis_h = dis_pred.h;
+    const int cls_w = cls_pred.w;
+    const int cls_h = cls_pred.h;
+    const int dis_w = dis_pred.w;
+    const int dis_h = dis_pred.h;
 
     if (cls_h < num_points || dis_h < num_points || cls_w < NUM_CLASS || dis_w < 4) {
         return;
     }
 
-    int reg_max_1 = dis_w / 4;
+    const int reg_max_1 = dis_w / 4;
     if (reg_max_1 <= 0) return;
 
     std::vector<float> dis_after_sm(reg_max_1);
@@ -179,9 +208,15 @@ static void generate_proposals(const ncnn::Mat& cls_pred,
     }
 }
 
+static jfloatArray make_empty_result(JNIEnv* env, int width, int height) {
+    float data[2] = {(float)std::max(1, width), (float)std::max(1, height)};
+    jfloatArray arr = env->NewFloatArray(2);
+    env->SetFloatArrayRegion(arr, 0, 2, data);
+    return arr;
+}
+
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_tencent_nanodetncnn_NanoDetNcnn_loadModel(JNIEnv* env, jobject thiz, jobject assetManager, jint modelid, jint cpugpu) {
-    (void)env;
     (void)thiz;
     (void)modelid;
     (void)cpugpu;
@@ -190,6 +225,9 @@ Java_com_tencent_nanodetncnn_NanoDetNcnn_loadModel(JNIEnv* env, jobject thiz, jo
     if (!mgr) return JNI_FALSE;
 
     g_net.clear();
+    ncnn::set_cpu_powersave(2);
+    ncnn::set_omp_num_threads(2);
+
     g_net.opt.use_vulkan_compute = false;
     g_net.opt.num_threads = 2;
     g_net.opt.use_fp16_arithmetic = true;
@@ -216,57 +254,44 @@ Java_com_tencent_nanodetncnn_NanoDetNcnn_detectRGBA(JNIEnv* env, jobject thiz, j
                                                     jint width, jint height, jint rowStride, jint targetSize) {
     (void)thiz;
 
-    std::vector<float> empty;
-    empty.push_back((float)std::max(1, (int)width));
-    empty.push_back((float)std::max(1, (int)height));
-
     if (!g_loaded || rgbaBuffer == nullptr || width <= 0 || height <= 0 || rowStride <= 0) {
-        jfloatArray arr = env->NewFloatArray((jsize)empty.size());
-        env->SetFloatArrayRegion(arr, 0, (jsize)empty.size(), empty.data());
-        return arr;
+        return make_empty_result(env, width, height);
     }
 
     unsigned char* rgba = (unsigned char*)env->GetDirectBufferAddress(rgbaBuffer);
     if (!rgba) {
-        jfloatArray arr = env->NewFloatArray((jsize)empty.size());
-        env->SetFloatArrayRegion(arr, 0, (jsize)empty.size(), empty.data());
-        return arr;
+        return make_empty_result(env, width, height);
     }
-
-    cv::Mat rgba_full(height, rowStride / 4, CV_8UC4, rgba);
-    cv::Mat rgba_crop = rgba_full(cv::Rect(0, 0, width, height));
-    cv::Mat rgb;
-    cv::cvtColor(rgba_crop, rgb, cv::COLOR_RGBA2RGB);
 
     int input_size = targetSize > 0 ? targetSize : 320;
     if (input_size < 160) input_size = 320;
 
-    int img_w = rgb.cols;
-    int img_h = rgb.rows;
-    float scale = std::min((float)input_size / img_w, (float)input_size / img_h);
-    int new_w = (int)(img_w * scale);
-    int new_h = (int)(img_h * scale);
+    // ImageReader 的 rowStride 通常大于 width*4，ncnn 不接受带 stride 的输入，先复制成连续 RGBA。
+    std::vector<unsigned char> rgba_contiguous((size_t)width * (size_t)height * 4u);
+    for (int y = 0; y < height; y++) {
+        const unsigned char* src = rgba + (size_t)y * (size_t)rowStride;
+        unsigned char* dst = rgba_contiguous.data() + (size_t)y * (size_t)width * 4u;
+        std::memcpy(dst, src, (size_t)width * 4u);
+    }
 
-    cv::Mat resized;
-    cv::resize(rgb, resized, cv::Size(new_w, new_h));
+    // 为了彻底去掉 OpenCV 依赖，这里直接将画面拉伸到 320x320。
+    // 检测框再用 scaleX/scaleY 映射回原始屏幕坐标。
+    ncnn::Mat in = ncnn::Mat::from_pixels_resize(
+            rgba_contiguous.data(),
+            ncnn::Mat::PIXEL_RGBA2RGB,
+            width,
+            height,
+            input_size,
+            input_size);
 
-    int wpad = input_size - new_w;
-    int hpad = input_size - new_h;
-    int left = wpad / 2;
-    int right = wpad - left;
-    int top = hpad / 2;
-    int bottom = hpad - top;
-
-    cv::Mat padded;
-    cv::copyMakeBorder(resized, padded, top, bottom, left, right, cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0));
-
-    ncnn::Mat in = ncnn::Mat::from_pixels(padded.data, ncnn::Mat::PIXEL_RGB, padded.cols, padded.rows);
     const float mean_vals[3] = {103.53f, 116.28f, 123.675f};
     const float norm_vals[3] = {0.017429f, 0.017507f, 0.017125f};
     in.substract_mean_normalize(mean_vals, norm_vals);
 
     ncnn::Extractor ex = g_net.create_extractor();
-    ex.input("input.1", in);
+    if (ex.input("input.1", in) != 0) {
+        return make_empty_result(env, width, height);
+    }
 
     std::vector<Object> proposals;
     const int strides[3] = {8, 16, 32};
@@ -289,8 +314,11 @@ Java_com_tencent_nanodetncnn_NanoDetNcnn_detectRGBA(JNIEnv* env, jobject thiz, j
 
     std::vector<float> out;
     out.reserve(2 + picked.size() * 6);
-    out.push_back((float)img_w);
-    out.push_back((float)img_h);
+    out.push_back((float)width);
+    out.push_back((float)height);
+
+    const float scale_x = (float)width / (float)input_size;
+    const float scale_y = (float)height / (float)input_size;
 
     const int max_objects = 50;
     int count = 0;
@@ -298,15 +326,15 @@ Java_com_tencent_nanodetncnn_NanoDetNcnn_detectRGBA(JNIEnv* env, jobject thiz, j
         if (count >= max_objects) break;
         Object obj = proposals[idx];
 
-        float x0 = (obj.rect.x - left) / scale;
-        float y0 = (obj.rect.y - top) / scale;
-        float x1 = (obj.rect.x + obj.rect.width - left) / scale;
-        float y1 = (obj.rect.y + obj.rect.height - top) / scale;
+        float x0 = obj.rect.x * scale_x;
+        float y0 = obj.rect.y * scale_y;
+        float x1 = (obj.rect.x + obj.rect.width) * scale_x;
+        float y1 = (obj.rect.y + obj.rect.height) * scale_y;
 
-        x0 = std::max(0.f, std::min(x0, (float)(img_w - 1)));
-        y0 = std::max(0.f, std::min(y0, (float)(img_h - 1)));
-        x1 = std::max(0.f, std::min(x1, (float)(img_w - 1)));
-        y1 = std::max(0.f, std::min(y1, (float)(img_h - 1)));
+        x0 = std::max(0.f, std::min(x0, (float)(width - 1)));
+        y0 = std::max(0.f, std::min(y0, (float)(height - 1)));
+        x1 = std::max(0.f, std::min(x1, (float)(width - 1)));
+        y1 = std::max(0.f, std::min(y1, (float)(height - 1)));
 
         float bw = x1 - x0;
         float bh = y1 - y0;
