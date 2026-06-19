@@ -1,0 +1,33 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.tencent.nanodetncnn'
+    compileSdk 33
+
+    defaultConfig {
+        applicationId 'com.tencent.nanodetncnn'
+        minSdk 23
+        targetSdk 28
+        versionCode 1
+        versionName '1.0'
+
+        ndk {
+            abiFilters 'armeabi-v7a'
+        }
+
+        externalNativeBuild {
+            cmake {
+                cppFlags '-std=c++17 -fexceptions -frtti'
+                arguments '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON'
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path file('src/main/jni/CMakeLists.txt')
+        }
+    }
+}

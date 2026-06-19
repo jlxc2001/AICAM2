@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:gravity="center"
+    android:padding="24dp"
+    android:background="#101010">
+
+    <TextView
+        android:id="@+id/title"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="AICAM 屏幕识别"
+        android:textColor="#FFFFFF"
+        android:textSize="24sp"
+        android:gravity="center"
+        android:layout_marginBottom="16dp" />
+
+    <TextView
+        android:id="@+id/status"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="模型：NanoDet ELite0 320 / CPU / 32位"
+        android:textColor="#BBBBBB"
+        android:textSize="14sp"
+        android:gravity="center"
+        android:layout_marginBottom="24dp" />
+
+    <Button
+        android:id="@+id/startScreenDetect"
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:text="开始识别屏幕画面" />
+
+    <Button
+        android:id="@+id/stopScreenDetect"
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:layout_marginTop="12dp"
+        android:text="停止识别" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="24dp"
+        android:text="用法：先点开始并授权悬浮窗/录屏，然后切到摄像头预览 App。识别框会以悬浮窗方式覆盖在画面上。"
+        android:textColor="#888888"
+        android:textSize="13sp"
+        android:lineSpacingExtra="4dp" />
+
+</LinearLayout>
